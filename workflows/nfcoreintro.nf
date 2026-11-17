@@ -3,8 +3,12 @@
     IMPORT MODULES / SUBWORKFLOWS / FUNCTIONS
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 */
-include { FASTQC                 } from '../modules/nf-core/fastqc/main'
+include { FASTP                  } from '../modules/nf-core/fastp/main'  
+include { BWA_MEM                } from '../modules/nf-core/bwa/mem/main' 
 include { MULTIQC                } from '../modules/nf-core/multiqc/main'
+include { SAMTOOLS_INDEX         } from '../modules/nf-core/samtools/index/main'  
+include { SAMTOOLS_FLAGSTAT      } from '../modules/nf-core/samtools/flagstat/main' 
+include { BCFTOOLS_MPILEUP       } from '../modules/nf-core/bcftools/mpileup/main'
 include { paramsSummaryMap       } from 'plugin/nf-schema'
 include { paramsSummaryMultiqc   } from '../subworkflows/nf-core/utils_nfcore_pipeline'
 include { softwareVersionsToYAML } from '../subworkflows/nf-core/utils_nfcore_pipeline'
@@ -20,6 +24,8 @@ workflow NFCOREINTRO {
 
     take:
     ch_samplesheet // channel: samplesheet read in from --input
+    fasta
+    bwa_index
     multiqc_config
     multiqc_logo
     multiqc_methods_description
@@ -30,11 +36,53 @@ workflow NFCOREINTRO {
     def ch_versions = channel.empty()
     def ch_multiqc_files = channel.empty()
     //
-    // MODULE: Run FastQC
+    // MODULE: Run FastP
     //
-    FASTQC(ch_samplesheet)
-    ch_multiqc_files = ch_multiqc_files.mix(FASTQC.out.zip.map{ _meta, file -> file })
-
+    ch_samplesheet = ch_samplesheet.map{ meta, reads -> [meta, reads, []]}
+    FASTP(
+        ch_samplesheet, 
+        false, 
+        false, 
+        false
+        )
+    ch_trimmed_reads = FASTP.out.reads
+    ch_multiqc_files = ch_multiqc_files.mix(FASTP.out.json.map{ _meta, file -> file })
+    //
+    // MODULE: Run bwa mem
+    //
+    BWA_MEM(
+        ch_trimmed_reads, 
+        bwa_index, 
+        fasta, 
+        true
+        )
+    ch_bam = BWA_MEM.out.bam
+    //
+    // MODULE: Run samtools index
+    //
+    SAMTOOLS_INDEX(
+        ch_bam, 
+        )
+    ch_bai = SAMTOOLS_INDEX.out.index
+    //
+    // MODULE: Run samtools flagstat
+    //
+    ch_alignments = ch_bam.join(ch_bai)
+    SAMTOOLS_FLAGSTAT(
+        ch_alignments, 
+        )
+    ch_multiqc_files = ch_multiqc_files.mix(SAMTOOLS_FLAGSTAT.out.flagstat.map{ _meta, file -> file })
+    //
+    // MODULE: Run bcftools mpileup
+    //
+    ch_varcall_input = ch_bam.map { meta, bam -> [ meta, bam, [], [] ] }
+    ch_fasta_fai = fasta.map { meta, file -> [meta, file, []]}
+    BCFTOOLS_MPILEUP(
+        ch_varcall_input, 
+        ch_fasta_fai,
+        false
+        )
+    ch_multiqc_files = ch_multiqc_files.mix(BCFTOOLS_MPILEUP.out.stats.map{ _meta, file -> file })
     //
     // Collate and save software versions
     //
